@@ -1,69 +1,1473 @@
-import Image from "next/image";
+"use client";
+
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  Search,
+  RefreshCw,
+  Newspaper,
+  ExternalLink,
+  CalendarDays,
+  ChevronLeft,
+  ChevronRight,
+  ArrowUp,
+  ArrowUpRight,
+  CloudSun,
+  Cloud,
+  CloudRain,
+  CloudLightning,
+  CloudFog,
+  Clock3,
+  Sparkles,
+  Bell,
+  Volume2,
+  VolumeX,
+  X,
+  Tv,
+  Radio,
+  PlayCircle,
+  Globe2,
+  Trophy,
+} from "lucide-react";
+
+type Article = {
+  title: string;
+  link: string;
+  image?: string | null;
+  publishedAt?: string | null;
+  source?: string;
+};
+
+type SideNewsItem = {
+  title: string;
+  link: string;
+  pubDate?: string;
+  source?: string;
+};
+
+type WeatherData = {
+  temperature: number;
+  feelsLike: number;
+  humidity: number;
+  windSpeed: number;
+  weatherCode: number;
+};
 
 export default function Home() {
+  const [articles, setArticles] = useState<Article[]>([]);
+  const [search, setSearch] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [failedImages, setFailedImages] = useState<string[]>([]);
+  const [isPaused, setIsPaused] = useState(false);
+
+  const [weather, setWeather] = useState<WeatherData | null>(null);
+  const [weatherLoading, setWeatherLoading] = useState(true);
+  const [currentTime, setCurrentTime] = useState<Date | null>(null);
+  const [showTopButton, setShowTopButton] = useState(false);
+  const [soundEnabled, setSoundEnabled] = useState(false);
+  const [sideNewsTab, setSideNewsTab] = useState<"world" | "sports">("world");
+  const [sideNews, setSideNews] = useState<SideNewsItem[]>([]);
+  const [sideNewsLoading, setSideNewsLoading] = useState(true);
+  const [sideNewsError, setSideNewsError] = useState(false);
+  const [channelTab, setChannelTab] = useState<"tv" | "radio">("tv");
+  const [newsNotification, setNewsNotification] = useState<{
+    title: string;
+    link: string;
+    count: number;
+  } | null>(null);
+
+  const sliderRef = useRef<HTMLDivElement>(null);
+  const knownNewsIdsRef = useRef<Set<string> | null>(null);
+  const notificationTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const soundEnabledRef = useRef(false);
+
+  const playNotificationSound = useCallback(() => {
+    if (!soundEnabledRef.current || typeof window === "undefined") return;
+
+    try {
+      const AudioContextClass = window.AudioContext;
+      if (!AudioContextClass) return;
+
+      const audioContext = new AudioContextClass();
+      const now = audioContext.currentTime;
+      const gain = audioContext.createGain();
+
+      gain.gain.setValueAtTime(0.0001, now);
+      gain.gain.exponentialRampToValueAtTime(0.055, now + 0.025);
+      gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.42);
+      gain.connect(audioContext.destination);
+
+      [660, 880].forEach((frequency, index) => {
+        const oscillator = audioContext.createOscillator();
+        oscillator.type = "sine";
+        oscillator.frequency.setValueAtTime(frequency, now + index * 0.12);
+        oscillator.connect(gain);
+        oscillator.start(now + index * 0.12);
+        oscillator.stop(now + index * 0.12 + 0.18);
+      });
+
+      window.setTimeout(() => void audioContext.close(), 700);
+    } catch (soundError) {
+      console.warn("Notification sound could not be played:", soundError);
+    }
+  }, []);
+
+  const showNewsNotification = useCallback(
+    (article: Article, count: number) => {
+      setNewsNotification({
+        title: article.title,
+        link: article.link || "#",
+        count,
+      });
+
+      playNotificationSound();
+
+      if (notificationTimerRef.current) {
+        window.clearTimeout(notificationTimerRef.current);
+      }
+
+      notificationTimerRef.current = window.setTimeout(() => {
+        setNewsNotification(null);
+      }, 6500);
+    },
+    [playNotificationSound]
+  );
+
+  const latestNews = useMemo(() => {
+    return [...articles]
+      .sort((a, b) => {
+        const dateA = a.publishedAt ? new Date(a.publishedAt).getTime() : 0;
+        const dateB = b.publishedAt ? new Date(b.publishedAt).getTime() : 0;
+        return dateB - dateA;
+      })
+      .slice(0, 10);
+  }, [articles]);
+
+  const filteredArticles = useMemo(() => {
+    const query = search.trim().toLowerCase();
+
+    if (!query) return articles;
+
+    return articles.filter((article) =>
+      `${article.title} ${article.source ?? ""}`.toLowerCase().includes(query)
+    );
+  }, [articles, search]);
+
+  const loadNews = useCallback(async () => {
+    try {
+      setLoading(true);
+      setError("");
+
+      const response = await fetch("/api/news", {
+        cache: "no-store",
+      });
+
+      if (!response.ok) {
+        throw new Error(`API Error: ${response.status}`);
+      }
+
+      const result = await response.json();
+
+      const newsList = Array.isArray(result)
+        ? result
+        : result.articles ??
+          result.news ??
+          result.data ??
+          result.items ??
+          [];
+
+      if (!Array.isArray(newsList)) {
+        throw new Error("News data is not an array.");
+      }
+
+      const validArticles: Article[] = newsList.filter(
+        (item: unknown): item is Article =>
+          typeof item === "object" &&
+          item !== null &&
+          "title" in item &&
+          typeof item.title === "string"
+      );
+
+      const getArticleId = (article: Article) =>
+        (article.link || `${article.title}-${article.source ?? ""}`).trim();
+
+      const incomingIds = new Set(validArticles.map(getArticleId));
+
+      // The first successful request establishes a baseline and does not alert.
+      if (knownNewsIdsRef.current === null) {
+        knownNewsIdsRef.current = incomingIds;
+      } else {
+        const newArticles = validArticles.filter(
+          (article) => !knownNewsIdsRef.current?.has(getArticleId(article))
+        );
+
+        if (newArticles.length > 0) {
+          showNewsNotification(newArticles[0], newArticles.length);
+        }
+
+        knownNewsIdsRef.current = new Set([
+          ...knownNewsIdsRef.current,
+          ...incomingIds,
+        ]);
+      }
+
+      setArticles(validArticles);
+      setFailedImages([]);
+    } catch (err) {
+      console.error("News loading error:", err);
+      setError("පුවත් ලබාගැනීමට නොහැකි වුණා. නැවත උත්සාහ කරන්න.");
+    } finally {
+      setLoading(false);
+    }
+  }, [showNewsNotification]);
+
+  // Load news and check for updates every 60 seconds.
+  useEffect(() => {
+    void loadNews();
+
+    const newsTimer = window.setInterval(() => {
+      void loadNews();
+    }, 60 * 1000);
+
+    return () => {
+      window.clearInterval(newsTimer);
+
+      if (notificationTimerRef.current) {
+        window.clearTimeout(notificationTimerRef.current);
+      }
+    };
+  }, [loadNews]);
+
+  useEffect(() => {
+    soundEnabledRef.current = soundEnabled;
+  }, [soundEnabled]);
+
+  // Live Sri Lankan clock
+  useEffect(() => {
+    setCurrentTime(new Date());
+
+    const timer = window.setInterval(() => {
+      setCurrentTime(new Date());
+    }, 1000);
+
+    return () => window.clearInterval(timer);
+  }, []);
+
+  // Back-to-top visibility
+  useEffect(() => {
+    const handleScroll = () => {
+      setShowTopButton(window.scrollY > 400);
+    };
+
+    window.addEventListener("scroll", handleScroll, {
+      passive: true,
+    });
+
+    handleScroll();
+
+    return () => window.removeEventListener("scroll", handleScroll);
+  }, []);
+
+  // Colombo weather
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadWeather() {
+      try {
+        const response = await fetch(
+          "https://api.open-meteo.com/v1/forecast?latitude=6.9271&longitude=79.8612&current=temperature_2m,relative_humidity_2m,apparent_temperature,weather_code,wind_speed_10m&timezone=Asia%2FColombo"
+        );
+
+        if (!response.ok) {
+          throw new Error("Weather request failed");
+        }
+
+        const data = await response.json();
+        const current = data.current;
+
+        if (!cancelled && current) {
+          setWeather({
+            temperature: current.temperature_2m,
+            feelsLike: current.apparent_temperature,
+            humidity: current.relative_humidity_2m,
+            windSpeed: current.wind_speed_10m,
+            weatherCode: current.weather_code,
+          });
+        }
+      } catch (err) {
+        console.error("Weather loading error:", err);
+      } finally {
+        if (!cancelled) setWeatherLoading(false);
+      }
+    }
+
+    void loadWeather();
+
+    const timer = window.setInterval(() => {
+      void loadWeather();
+    }, 10 * 60 * 1000);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+
+      }, []);
+
+  // Load world and sports headlines from Google News RSS via RSS2JSON.
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadSideNews() {
+      setSideNewsLoading(true);
+      setSideNewsError(false);
+
+      const feedUrl =
+        sideNewsTab === "world"
+          ? "https://news.google.com/rss/search?q=world+news&hl=en-US&gl=US&ceid=US:en"
+          : "https://news.google.com/rss/search?q=world+sports&hl=en-US&gl=US&ceid=US:en";
+
+      try {
+      const feedUrl =
+  sideNewsTab === "world"
+    ? "https://news.google.com/rss/search?q=world+news&hl=en-US&gl=US&ceid=US:en"
+    : "https://news.google.com/rss/search?q=world+sports&hl=en-US&gl=US&ceid=US:en";
+
+const endpoint = `https://api.rss2json.com/v1/api.json?rss_url=${encodeURIComponent(feedUrl)}`;
+
+const response = await fetch(endpoint, {
+  cache: "no-store",
+});
+
+        if (!response.ok) throw new Error("Could not load side news");
+
+        const data = await response.json();
+
+        const items: SideNewsItem[] = Array.isArray(data.items)
+          ? data.items.slice(0, 8).map((item: {
+              title?: unknown;
+              link?: unknown;
+              pubDate?: unknown;
+              author?: unknown;
+            }) => ({
+              title:
+                typeof item.title === "string"
+                  ? item.title
+                  : "Untitled news",
+              link:
+                typeof item.link === "string"
+                  ? item.link
+                  : "https://news.google.com/",
+              pubDate:
+                typeof item.pubDate === "string"
+                  ? item.pubDate
+                  : undefined,
+              source:
+                typeof item.author === "string"
+                  ? item.author
+                  : typeof data.feed?.title === "string"
+                    ? data.feed.title
+                    : undefined,
+            }))
+          : [];
+
+        if (!cancelled) {
+          setSideNews(items);
+          setSideNewsError(items.length === 0);
+        }
+      } catch (err) {
+        console.error("World/sports news loading error:", err);
+
+        if (!cancelled) {
+          setSideNews([]);
+          setSideNewsError(true);
+        }
+      } finally {
+        if (!cancelled) setSideNewsLoading(false);
+      }
+    }
+
+    void loadSideNews();
+
+    const timer = window.setInterval(
+      () => void loadSideNews(),
+      5 * 60 * 1000
+    );
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [sideNewsTab]);
+
+  // Auto-sliding latest headlines
+  useEffect(() => {
+    const slider = sliderRef.current;
+
+    if (!slider || isPaused || latestNews.length < 2) {
+      return;
+    }
+
+    const timer = window.setInterval(() => {
+      const maxScroll = slider.scrollWidth - slider.clientWidth;
+
+      if (maxScroll <= 5) return;
+
+      if (slider.scrollLeft >= maxScroll - 8) {
+        slider.scrollTo({
+          left: 0,
+          behavior: "smooth",
+        });
+      } else {
+        slider.scrollBy({
+          left: 320,
+          behavior: "smooth",
+        });
+      }
+    }, 3200);
+
+    return () => window.clearInterval(timer);
+  }, [isPaused, latestNews]);
+
+  function formatDate(date?: string | null) {
+    if (!date) return null;
+
+    const parsedDate = new Date(date);
+
+    if (Number.isNaN(parsedDate.getTime())) return date;
+
+    return new Intl.DateTimeFormat("si-LK", {
+      timeZone: "Asia/Colombo",
+      dateStyle: "medium",
+      timeStyle: "short",
+    }).format(parsedDate);
+  }
+
+  function getWeatherInfo(code: number) {
+    if (code === 0) {
+      return { label: "පැහැදිලි අහස", Icon: CloudSun };
+    }
+
+    if ([1, 2].includes(code)) {
+      return { label: "අර්ධ වශයෙන් වලාකුළු", Icon: CloudSun };
+    }
+
+    if (code === 3) {
+      return { label: "වලාකුළු සහිතයි", Icon: Cloud };
+    }
+
+    if ([45, 48].includes(code)) {
+      return { label: "මීදුම", Icon: CloudFog };
+    }
+
+    if (
+      [51, 53, 55, 56, 57, 61, 63, 65, 66, 67, 80, 81, 82].includes(code)
+    ) {
+      return { label: "වැසි", Icon: CloudRain };
+    }
+
+    if ([71, 73, 75, 77, 85, 86].includes(code)) {
+      return { label: "හිම පතනය", Icon: Cloud };
+    }
+
+    if ([95, 96, 99].includes(code)) {
+      return { label: "ගිගුරුම් සහිත වැසි", Icon: CloudLightning };
+    }
+
+    return { label: "කාලගුණ තොරතුරු", Icon: CloudSun };
+  }
+
+  const sriLankaDate = currentTime
+    ? new Intl.DateTimeFormat("si-LK", {
+        timeZone: "Asia/Colombo",
+        dateStyle: "full",
+      }).format(currentTime)
+    : "වේලාව ලබාගනිමින්...";
+
+  const sriLankaClock = currentTime
+    ? new Intl.DateTimeFormat("en-GB", {
+        timeZone: "Asia/Colombo",
+        hour: "2-digit",
+        minute: "2-digit",
+        second: "2-digit",
+        hour12: false,
+      }).format(currentTime)
+    : "--:--:--";
+
+  function moveSlider(direction: -1 | 1) {
+    sliderRef.current?.scrollBy({
+      left: direction * 320,
+      behavior: "smooth",
+    });
+  }
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert h-5 w-[100px]"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the{" "}
-            <code className="rounded bg-black/[.06] px-1.5 py-0.5 font-mono text-[0.9em] dark:bg-white/[.08]">
-              page.tsx
-            </code>{" "}
-            file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
+    <main className="min-h-screen overflow-hidden bg-[#080b12] text-white selection:bg-blue-500/30">
+      <style>{`
+        @keyframes lt-fade-up {
+          from { opacity: 0; transform: translateY(20px); }
+          to { opacity: 1; transform: translateY(0); }
+        }
+
+        @keyframes lt-glow {
+          0%, 100% { opacity: .3; transform: scale(1); }
+          50% { opacity: .6; transform: scale(1.08); }
+        }
+
+        @keyframes lt-marquee {
+          0% { transform: translateX(100%); }
+          100% { transform: translateX(-100%); }
+        }
+
+        .lt-marquee {
+          animation: lt-marquee 82s linear infinite;
+          width: max-content;
+        }
+
+        .lt-marquee:hover {
+          animation-play-state: paused;
+        }
+
+        @keyframes lt-float {
+          0%, 100% { transform: translateY(0); }
+          50% { transform: translateY(-6px); }
+        }
+
+        .lt-fade-up {
+          animation: lt-fade-up .65s ease-out both;
+        }
+
+        .lt-delay-1 { animation-delay: .08s; }
+        .lt-delay-2 { animation-delay: .16s; }
+        .lt-delay-3 { animation-delay: .24s; }
+
+        .lt-glow {
+          animation: lt-glow 7s ease-in-out infinite;
+        }
+
+        .lt-float {
+          animation: lt-float 4s ease-in-out infinite;
+        }
+
+        .lt-slider::-webkit-scrollbar {
+          display: none;
+        }
+
+        .lt-slider {
+          scrollbar-width: none;
+          -ms-overflow-style: none;
+        }
+
+        @keyframes lt-notification-in {
+          from { opacity: 0; transform: translate3d(28px, -8px, 0) scale(.96); }
+          to { opacity: 1; transform: translate3d(0, 0, 0) scale(1); }
+        }
+
+        @keyframes lt-notification-ring {
+          0%, 100% { box-shadow: 0 0 0 0 rgba(56, 189, 248, .12); }
+          50% { box-shadow: 0 0 0 7px rgba(56, 189, 248, 0); }
+        }
+
+        .lt-notification { animation: lt-notification-in .38s cubic-bezier(.2,.8,.2,1) both; }
+        .lt-notification-icon { animation: lt-notification-ring 1.6s ease-out infinite; }
+
+        @media (prefers-reduced-motion: reduce) {
+          .lt-notification, .lt-notification-icon { animation: none !important; }
+          .lt-fade-up, .lt-glow, .lt-float, .lt-marquee {
+            animation: none !important;
+          }
+
+          *, *::before, *::after {
+            scroll-behavior: auto !important;
+            animation-duration: .01ms !important;
+            transition-duration: .01ms !important;
+          }
+        }
+      `}</style>
+
+      {/* Header */}
+      <header className="sticky top-0 z-30 border-b border-white/[0.08] bg-[#080b12]/85 backdrop-blur-2xl">
+        <div className="mx-auto flex max-w-7xl items-center justify-between gap-4 px-4 py-3.5 sm:px-6 lg:px-8">
+          <a href="/" className="group flex items-center gap-3">
+            <div className="rounded-2xl bg-gradient-to-br from-blue-500 to-indigo-700 p-2.5 shadow-lg shadow-blue-600/20 transition duration-300 group-hover:rotate-[-5deg] group-hover:scale-105">
+              <Newspaper size={24} />
+            </div>
+
+            <div>
+              <h1 className="text-xl font-extrabold tracking-tight sm:text-2xl">
+                Lanka<span className="text-blue-400">Trend</span>
+              </h1>
+              <p className="text-[11px] tracking-wide text-gray-400 sm:text-xs">
+                ශ්‍රී ලංකාවේ නවතම පුවත්
+              </p>
+            </div>
+          </a>
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                const nextEnabled = !soundEnabled;
+                soundEnabledRef.current = nextEnabled;
+                setSoundEnabled(nextEnabled);
+
+                if (nextEnabled) {
+                  // A user click unlocks audio playback in most browsers.
+                  playNotificationSound();
+                }
+              }}
+              aria-label={
+                soundEnabled
+                  ? "Turn notification sound off"
+                  : "Turn notification sound on"
+              }
+              title={
+                soundEnabled
+                  ? "Notification sound on"
+                  : "Enable notification sound"
+              }
+              className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/[0.04] px-3 py-2.5 text-sm text-gray-200 transition hover:border-blue-400/40 hover:bg-blue-500/10"
             >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
+              {soundEnabled ? (
+                <Volume2 size={17} className="text-sky-300" />
+              ) : (
+                <VolumeX size={17} />
+              )}
+              <span className="hidden sm:inline">
+                {soundEnabled ? "Sound On" : "Sound Off"}
+              </span>
+            </button>
+
+            <button
+              onClick={() => void loadNews()}
+              disabled={loading}
+              className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-white/[0.04] px-3.5 py-2.5 text-sm font-medium text-gray-200 transition hover:border-blue-400/40 hover:bg-blue-500/10 disabled:opacity-50 sm:px-4"
             >
-              Learning
-            </a>{" "}
-            center.
+              <RefreshCw
+                size={16}
+                className={loading ? "animate-spin" : ""}
+              />
+              <span>{loading ? "Loading..." : "Refresh"}</span>
+            </button>
+          </div>
+        </div>
+      </header>
+
+      {/* Animated new-news notification */}
+      {newsNotification && (
+        <div
+          className="lt-notification fixed right-4 top-24 z-[70] w-[calc(100%-2rem)] max-w-sm sm:right-6"
+          role="status"
+          aria-live="polite"
+        >
+          <div className="relative overflow-hidden rounded-2xl border border-sky-300/25 bg-[#101a2a]/95 p-4 shadow-2xl shadow-sky-950/40 backdrop-blur-xl">
+            <div className="absolute inset-x-0 top-0 h-[2px] bg-gradient-to-r from-sky-400 via-blue-400 to-indigo-400" />
+
+            <div className="flex items-start gap-3">
+              <div className="lt-notification-icon flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-sky-400/15 text-sky-300">
+                <Bell size={20} />
+              </div>
+
+              <div className="min-w-0 flex-1">                <div className="flex items-center gap-2 text-sm font-bold text-white">
+                  <span>අලුත් පුවතක්!</span>
+                  <span className="rounded-full bg-emerald-400/15 px-2 py-0.5 text-[10px] font-semibold text-emerald-300">
+                    LIVE
+                  </span>
+                </div>
+
+                <p className="mt-1 line-clamp-2 text-sm leading-5 text-gray-300">
+                  {newsNotification.title}
+                </p>
+
+                {newsNotification.count > 1 && (
+                  <p className="mt-1 text-xs text-sky-300">
+                    තවත් අලුත් පුවත් {newsNotification.count - 1}ක් ලැබුණා.
+                  </p>
+                )}
+
+                {newsNotification.link !== "#" && (
+                  <a
+                    href={newsNotification.link}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="mt-2 inline-flex items-center gap-1 text-xs font-semibold text-sky-300 hover:text-sky-200"
+                  >
+                    පුවත කියවන්න <ArrowUpRight size={13} />
+                  </a>
+                )}
+              </div>
+
+              <button
+                type="button"
+                aria-label="Close notification"
+                onClick={() => setNewsNotification(null)}
+                className="rounded-lg p-1 text-gray-500 transition hover:bg-white/10 hover:text-white"
+              >
+                <X size={16} />
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Animated headlines ticker below navbar */}
+      <div className="relative z-20 overflow-hidden border-b border-blue-400/15 bg-[#0d1422]">
+        <div className="mx-auto flex max-w-7xl items-center gap-3 px-4 py-2.5 sm:px-6 lg:px-8">
+          <span className="inline-flex shrink-0 items-center gap-2 rounded-md bg-red-500/15 px-2.5 py-1 text-[10px] font-extrabold tracking-wider text-red-300 sm:text-xs">
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-red-400" />
+            BREAKING
+          </span>
+
+          <div className="relative min-w-0 flex-1 overflow-hidden">
+            <div className="lt-marquee flex items-center gap-10 whitespace-nowrap">
+              {(
+                latestNews.length
+                  ? latestNews
+                  : [{ title: "නවතම පුවත් ලබාගනිමින්...", link: "#" }]
+              ).map((article, index) => (
+                <a
+                  key={`${article.link || article.title}-ticker-${index}`}
+                  href={article.link || "#"}
+                  target={
+                    article.link && article.link !== "#"
+                      ? "_blank"
+                      : undefined
+                  }
+                  rel="noopener noreferrer"
+                  className="inline-flex max-w-[75vw] items-center gap-2 text-xs font-medium text-gray-200 transition hover:text-sky-300 sm:text-sm"
+                >
+                  <span className="text-blue-400">◆</span>
+                  <span className="max-w-[70vw] truncate">
+                    {article.title}
+                  </span>
+                </a>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <section className="relative mx-auto w-full max-w-[1760px] px-4 pb-16 pt-9 sm:px-6 sm:pt-14 lg:px-8">
+        <div className="grid grid-cols-1 items-start gap-6 xl:grid-cols-[190px_minmax(0,1fr)_250px] 2xl:gap-8">
+          {/* LEFT SIDEBAR: Sri Lankan TV and radio channels */}
+          <aside className="order-2 rounded-2xl border border-white/10 bg-[#0e1420]/90 p-3 shadow-xl shadow-black/10 xl:order-1 xl:sticky xl:top-28">
+            <div className="mb-3 flex items-center gap-2 px-1">
+              <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-emerald-400/10 text-emerald-300">
+                <PlayCircle size={18} />
+              </div>
+
+              <div>
+                <h3 className="text-sm font-bold text-white">
+                  Live Channels
+                </h3>
+                <p className="text-[10px] text-gray-500">Sri Lanka</p>
+              </div>
+            </div>
+
+            <div className="mb-3 grid grid-cols-2 gap-1 rounded-xl bg-black/20 p-1">
+              <button
+                type="button"
+                onClick={() => setChannelTab("tv")}
+                className={`flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-xs font-semibold transition ${
+                  channelTab === "tv"
+                    ? "bg-blue-500/20 text-blue-200"
+                    : "text-gray-500 hover:text-white"
+                }`}
+              >
+                <Tv size={14} /> TV
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setChannelTab("radio")}
+                className={`flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-xs font-semibold transition ${
+                  channelTab === "radio"
+                    ? "bg-blue-500/20 text-blue-200"
+                    : "text-gray-500 hover:text-white"
+                }`}
+              >
+                <Radio size={14} /> Radio
+              </button>
+            </div>
+
+            <div className="space-y-1.5">
+              {(channelTab === "tv"
+                ? [
+                    {
+                      name: "Rupavahini",
+                      short: "RUP",
+                      url: "https://tv.rupavahini.lk/live-webcast/rupavahini-live-webcast2/",
+                      color: "bg-red-500/15 text-red-300",
+                    },
+                    {
+                      name: "ITN",
+                      short: "ITN",
+                      url: "https://itn.lk/live/",
+                      color: "bg-sky-500/15 text-sky-300",
+                    },
+                    {
+                      name: "Hiru TV",
+                      short: "HIRU",
+                      url: "https://www.hirutv.lk/hrs.php",
+                      color: "bg-orange-500/15 text-orange-300",
+                    },
+                    {
+                      name: "TV Derana",
+                      short: "DER",
+                      url: "https://www.derana.lk/",
+                      color: "bg-rose-500/15 text-rose-300",
+                    },
+                    {
+                      name: "Sirasa TV",
+                      short: "SIR",
+                      url: "https://www.sirasatv.lk/",
+                      color: "bg-purple-500/15 text-purple-300",
+                    },
+                    {
+                      name: "Swarnavahini",
+                      short: "SW",
+                      url: "https://www.swarnavahini.lk/",
+                      color: "bg-amber-500/15 text-amber-300",
+                    },
+                    {
+                      name: "Siyatha TV",
+                      short: "SIY",
+                      url: "https://siyathatv.lk/",
+                      color: "bg-green-500/15 text-green-300",
+                    },
+                  ]
+                : [
+                    {
+                      name: "SLBC Radio",
+                      short: "SLBC",
+                      url: "https://www.slbc.lk/",
+                      color: "bg-sky-500/15 text-sky-300",
+                    },
+                    {
+                      name: "Hiru FM",
+                      short: "HIRU",
+                      url: "https://www.hirufm.lk/",
+                      color: "bg-orange-500/15 text-orange-300",
+                    },
+                    {
+                      name: "Sirasa FM",
+                      short: "SIR",
+                      url: "https://www.sirasafm.lk/",
+                      color: "bg-purple-500/15 text-purple-300",
+                    },
+                    {
+                      name: "Neth FM",
+                      short: "NETH",
+                      url: "https://nethfm.lk/",
+                      color: "bg-green-500/15 text-green-300",
+                    },
+                    {
+                      name: "Shakthi FM",
+                      short: "SHAK",
+                      url: "https://www.shakthifm.lk/",
+                      color: "bg-pink-500/15 text-pink-300",
+                    },
+                  ]
+              ).map((channel) => (
+                <a
+                  key={channel.name}
+                  href={channel.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="group flex items-center gap-2.5 rounded-xl border border-transparent px-2 py-2 transition hover:border-white/10 hover:bg-white/[0.04]"
+                >
+                  <span
+                    className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg text-[10px] font-extrabold ${channel.color}`}
+                  >
+                    {channel.short}
+                  </span>
+
+                  <span className="min-w-0 flex-1 truncate text-xs font-medium text-gray-300 group-hover:text-white">
+                    {channel.name}
+                  </span>
+
+                  <PlayCircle
+                    size={14}
+                    className="shrink-0 text-gray-600 transition group-hover:text-emerald-300"
+                  />
+                </a>
+              ))}
+            </div>
+
+            <p className="mt-3 border-t border-white/[0.07] pt-3 text-[10px] leading-4 text-gray-600">
+              නාලිකාව මත click කර නිල වෙබ් අඩවියෙන් Live බලන්න / අහන්න.
+            </p>
+          </aside>
+
+          {/* MAIN NEWS CONTENT */}
+          <div className="order-1 min-w-0 xl:order-2">
+            <div
+              aria-hidden="true"
+              className="lt-glow pointer-events-none absolute -right-32 top-0 h-80 w-80 rounded-full bg-blue-600/10 blur-[100px]"
+            />
+
+            <div
+              aria-hidden="true"
+              className="pointer-events-none absolute -left-32 top-72 h-72 w-72 rounded-full bg-indigo-600/[0.08] blur-[100px]"
+            />
+
+            {/* Hero title */}
+            <div className="relative mb-6 max-w-8xl lt-fade-up">
+              <div className="mb-2 inline-flex items-center gap-2 rounded-full border border-blue-400/20 bg-blue-500/[0.08] px-3.5 py-2 text-xs font-semibold tracking-wider text-blue-300">
+                <Sparkles size={14} />
+                YOUR DAILY NEWS UPDATE
+                <span className="ml-1 h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
+              </div>
+
+              <h2 className="text-4xl font-extrabold leading-[1.15] tracking-tight sm:text-5xl lg:text-6xl">
+                ඔබේ ලෝකය,
+                <br />
+                <span className="bg-gradient-to-r from-blue-400 via-sky-300 to-indigo-400 bg-clip-text text-transparent">
+                  නවතම පුවත් සමඟ.
+                </span>
+              </h2>
+
+              <p className="mt-5 max-w-xl text-sm leading-7 text-gray-400 sm:text-base sm:leading-8">
+                ශ්‍රී ලංකාවේ පුවත් මූලාශ්‍රවලින් නවතම තොරතුරු
+                එකම තැනකින් දැනගන්න. ඔබට අවශ්‍ය පුවත සොයාගෙන
+                මුල් මූලාශ්‍රයෙන් කියවන්න.
+              </p>
+
+              <div className="mt-6 flex flex-wrap items-center gap-3 text-xs text-gray-400">
+                <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.03] px-3 py-2">
+                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                  Sinhala News
+                </span>
+
+                <span className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.03] px-3 py-2">
+                  <Newspaper size={13} />
+                  Multiple Sources
+                </span>
+              </div>
+
+              {/* Compact live clock and temperature on the right */}
+              <div className="mt-7 flex flex-wrap items-center gap-3 rounded-2xl border border-white/10 bg-white/[0.035] p-3 sm:p-4 lg:absolute lg:right-0 lg:top-8 lg:mt-0 lg:min-w-[225px] lg:flex-col lg:items-start">
+                <div className="flex items-center gap-2 text-xs text-indigo-200">
+                  <Clock3 size={15} />
+                  <span>ශ්‍රී ලංකාවේ වේලාව</span>
+                </div>
+
+                <p className="font-mono text-xl font-bold tracking-tight sm:text-2xl">
+                  {sriLankaClock}
+                </p>
+
+                <div className="h-px w-full bg-white/10" />
+
+                <div className="flex w-full items-center gap-2 text-xs text-sky-200">
+                  {weather ? (
+                    (() => {
+                      const WeatherIcon = getWeatherInfo(weather.weatherCode).Icon;
+                      return <WeatherIcon size={17} />;
+                    })()
+                  ) : (
+                    <CloudSun size={17} />
+                  )}
+
+                  <span>කොළඹ උෂ්ණත්වය</span>
+
+                  <strong className="ml-auto text-base text-white">
+                    {weather
+                      ? `${Math.round(weather.temperature)}°C`
+                      : weatherLoading
+                        ? "..."
+                        : "N/A"}
+                  </strong>
+                </div>
+
+                <p className="text-[10px] text-gray-500">
+                  Live · Asia/Colombo
+                </p>
+              </div>
+            </div>
+
+            {/* Latest news slider */}
+            <section className="relative mb-12 overflow-hidden rounded-3xl border border-white/10 bg-gradient-to-br from-[#121a2a] via-[#0e1420] to-[#10111d] p-4 shadow-2xl shadow-black/20 sm:p-6 lt-fade-up lt-delay-2">
+              <div className="mb-5 flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2.5">
+                  <span className="flex h-8 w-8 items-center justify-center rounded-xl bg-blue-500/15 text-blue-300">
+                    <Sparkles size={17} />
+                  </span>
+
+                  <div>
+                    <h3 className="text-lg font-bold sm:text-xl">
+                      නවතම සිරස්තල
+                    </h3>
+                    <p className="mt-1 text-xs text-gray-500">
+                      Latest 10 headlines · Auto sliding
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex shrink-0 gap-2">
+                  <button
+                    type="button"
+                    aria-label="පෙර පුවත්"
+                    onClick={() => moveSlider(-1)}
+                    className="rounded-xl border border-white/10 bg-white/[0.04] p-2.5 text-gray-300 transition hover:border-blue-400/40 hover:bg-blue-500/10 hover:text-white"
+                  >
+                    <ChevronLeft size={19} />
+                  </button>
+
+                  <button
+                    type="button"
+                    aria-label="ඊළඟ පුවත්"
+                    onClick={() => moveSlider(1)}
+                    className="rounded-xl border border-white/10 bg-white/[0.04] p-2.5 text-gray-300 transition hover:border-blue-400/40 hover:bg-blue-500/10 hover:text-white"
+                  >
+                    <ChevronRight size={19} />
+                  </button>
+                </div>
+              </div>
+
+              <div className="mb-4 h-px bg-gradient-to-r from-blue-500/50 via-white/10 to-transparent" />
+
+              {latestNews.length > 0 ? (
+                <div
+                  ref={sliderRef}
+                  onMouseEnter={() => setIsPaused(true)}
+                  onMouseLeave={() => setIsPaused(false)}
+                  onTouchStart={() => setIsPaused(true)}
+                  onTouchEnd={() => setIsPaused(false)}
+                  onFocusCapture={() => setIsPaused(true)}
+                  onBlurCapture={() => setIsPaused(false)}
+                  className="lt-slider flex snap-x snap-mandatory gap-3 overflow-x-auto scroll-smooth pb-2"
+                >
+                  {latestNews.map((article, index) => (
+                    <a
+                      key={`${article.link || article.title}-${index}`}
+                      href={article.link || "#"}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="group flex w-[265px] shrink-0 snap-start flex-col rounded-2xl border border-white/[0.08] bg-white/[0.035] p-4 transition duration-300 hover:-translate-y-1 hover:border-blue-400/40 hover:bg-blue-500/[0.07] sm:w-[300px] sm:p-5"
+                    >
+                      <div className="mb-4 flex items-center justify-between gap-2">
+                        <span className="max-w-[190px] truncate rounded-full border border-blue-400/15 bg-blue-500/10 px-2.5 py-1 text-[11px] font-medium text-blue-300">
+                          {article.source || "පුවත්"}
+                        </span>
+
+                        <span className="font-mono text-xs text-gray-600">
+                          {String(index + 1).padStart(2, "0")}
+                        </span>
+                      </div>
+
+                      <h4 className="line-clamp-3 min-h-[78px] text-sm font-semibold leading-6 text-gray-100 transition-colors group-hover:text-blue-300 sm:text-base">
+                        {article.title}
+                      </h4>
+
+                      <div className="mt-4 flex items-center justify-between gap-3 border-t border-white/[0.08] pt-3">
+                        <span className="line-clamp-1 text-[11px] text-gray-500">
+                          {formatDate(article.publishedAt) || "නවතම පුවත"}
+                        </span>
+
+                        <ArrowUpRight
+                          size={16}
+                          className="shrink-0 text-gray-500 transition duration-300 group-hover:-translate-y-0.5 group-hover:translate-x-0.5 group-hover:text-blue-300"
+                        />
+                      </div>
+                    </a>
+                  ))}
+                </div>
+              ) : (
+                <div className="py-10 text-center text-sm text-gray-500">
+                  {loading
+                    ? "නවතම පුවත් ලබාගනිමින්..."
+                    : "දැනට පුවත් නොමැත"}
+                </div>
+              )}
+
+              <p className="mt-3 text-[11px] text-gray-500">
+                <span className="mr-1 text-blue-400">●</span>
+                Slider එක pause කිරීමට mouse එක ඒ මත තබන්න.
+              </p>
+            </section>
+
+            {/* Search */}
+            <div className="mb-7 flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between lt-fade-up lt-delay-3">
+              <div className="relative w-full sm:max-w-xl">
+                <Search
+                  size={19}
+                  className="absolute left-4 top-1/2 -translate-y-1/2 text-gray-500"
+                />                
+
+                <input
+                  value={search}
+                  onChange={(event) => setSearch(event.target.value)}
+                  placeholder="පුවත් හෝ මූලාශ්‍රය සොයන්න..."
+                  aria-label="පුවත් සොයන්න"
+                  className="w-full rounded-2xl border border-white/10 bg-[#111725]/90 py-4 pl-12 pr-4 text-sm text-white outline-none transition placeholder:text-gray-500 focus:border-blue-500/60 focus:bg-[#141b2a] focus:ring-4 focus:ring-blue-500/[0.08]"
+                />
+              </div>
+
+              <div className="flex items-center gap-2 self-start rounded-xl border border-white/[0.08] bg-white/[0.03] px-4 py-3 text-sm text-gray-400 sm:self-auto">
+                <Newspaper size={17} className="text-blue-400" />
+                <span>
+                  පුවත්{" "}
+                  <strong className="text-white">
+                    {filteredArticles.length}
+                  </strong>{" "}
+                  ක්
+                </span>
+              </div>
+            </div>
+
+            {/* Error */}
+            {error && (
+              <div
+                role="alert"
+                className="mb-6 flex flex-col gap-3 rounded-2xl border border-red-500/20 bg-red-500/[0.06] p-4 text-sm text-red-300 sm:flex-row sm:items-center sm:justify-between"
+              >
+                <p>{error}</p>
+
+                <button
+                  onClick={() => void loadNews()}
+                  className="self-start rounded-lg border border-red-400/20 px-3 py-2 font-medium transition hover:bg-red-500/10 sm:self-auto"
+                >
+                  නැවත උත්සාහ කරන්න
+                </button>
+              </div>
+            )}
+
+            {/* Loading skeletons */}
+            {loading && articles.length === 0 ? (
+              <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                {Array.from({ length: 8 }).map((_, index) => (
+                  <div
+                    key={index}
+                    className="overflow-hidden rounded-2xl border border-white/[0.08] bg-[#101521]"
+                  >
+                    <div className="h-48 animate-pulse bg-gradient-to-br from-white/[0.06] to-white/[0.02]" />
+
+                    <div className="space-y-4 p-5">
+                      <div className="h-5 w-24 animate-pulse rounded-full bg-white/10" />
+                      <div className="h-4 animate-pulse rounded bg-white/10" />
+                      <div className="h-4 w-4/5 animate-pulse rounded bg-white/10" />
+                      <div className="h-3 w-2/5 animate-pulse rounded bg-white/[0.06]" />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            ) : filteredArticles.length > 0 ? (
+              <>
+                <div className="mb-5 flex items-center justify-between gap-3">
+                  <div>
+                    <h3 className="text-xl font-bold sm:text-2xl">
+                      සියලුම පුවත්
+                    </h3>
+                    <p className="mt-1 text-xs text-gray-500">
+                      All the latest headlines in one place
+                    </p>
+                  </div>
+                </div>
+
+                {/* Four news cards per row on extra-large screens */}
+                <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                  {filteredArticles.map((article, index) => {
+                    const imageKey = `${article.link || article.title}-${index}`;
+
+                    const showImage =
+                      Boolean(article.image) &&
+                      !failedImages.includes(imageKey);
+
+                    return (
+                      <article
+                        key={imageKey}
+                        style={{
+                          animationDelay: `${Math.min(index % 9, 8) * 55}ms`,
+                        }}
+                        className="group flex min-w-0 flex-col overflow-hidden rounded-2xl border border-white/[0.08] bg-[#101521] transition duration-300 hover:-translate-y-1 hover:border-blue-400/30 hover:bg-[#121a29] hover:shadow-xl hover:shadow-blue-950/10 lt-fade-up"
+                      >
+                        {showImage ? (
+                          <a
+                            href={article.link || "#"}
+                            target="_blank"
+                            rel="noopener noreferrer"
+                            aria-label={`${article.title} - පුවත කියවන්න`}
+                            className="relative block h-48 overflow-hidden bg-[#171e2b] sm:h-52"
+                          >
+                            <img
+                              src={article.image!}
+                              alt={article.title}
+                              loading={index < 3 ? "eager" : "lazy"}
+                              referrerPolicy="no-referrer"
+                              onError={() =>
+                                setFailedImages((previous) =>
+                                  previous.includes(imageKey)
+                                    ? previous
+                                    : [...previous, imageKey]
+                                )
+                              }
+                              className="h-full w-full object-cover transition duration-700 ease-out group-hover:scale-105"
+                            />
+
+                            <div className="absolute inset-0 bg-gradient-to-t from-[#080b12]/70 via-transparent to-transparent opacity-80 transition group-hover:opacity-50" />
+
+                            <span className="absolute bottom-3 left-3 rounded-full border border-white/15 bg-black/40 px-3 py-1.5 text-[11px] font-medium text-white backdrop-blur-md">
+                              {article.source || "පුවත්"}
+                            </span>
+
+                            <span className="absolute right-3 top-3 rounded-lg bg-black/40 p-2 text-white opacity-0 backdrop-blur-md transition duration-300 group-hover:opacity-100">
+                              <ArrowUpRight size={17} />
+                            </span>
+                          </a>
+                        ) : (
+                          /* Show black background if the image is missing */
+                          <div
+                            className="h-48 w-full bg-black sm:h-52"
+                            aria-hidden="true"
+                          />
+                        )}
+
+                        <div className="flex flex-1 flex-col p-5">
+                          {!showImage && (
+                            <div className="mb-3">
+                              <span className="rounded-full border border-blue-400/15 bg-blue-500/10 px-2.5 py-1 text-[11px] font-medium text-blue-300">
+                                {article.source || "පුවත්"}
+                              </span>
+                            </div>
+                          )}
+
+                          <h3 className="flex-1 text-base font-semibold leading-7 text-gray-100 transition-colors group-hover:text-blue-300 sm:text-lg">
+                            {article.title}
+                          </h3>
+
+                          {article.publishedAt && (
+                            <p className="mt-4 flex items-center gap-2 text-xs leading-5 text-gray-500">
+                              <CalendarDays size={14} className="shrink-0" />
+                              <span>{formatDate(article.publishedAt)}</span>
+                            </p>
+                          )}
+
+                          {article.link && (
+                            <a
+                              href={article.link}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="mt-5 inline-flex items-center justify-between gap-2 border-t border-white/[0.08] pt-4 text-sm font-medium text-blue-400 transition hover:text-blue-300"
+                            >
+                              <span>සම්පූර්ණ පුවත කියවන්න</span>
+                              <ExternalLink
+                                size={15}
+                                className="shrink-0 transition-transform group-hover:translate-x-0.5"
+                              />
+                            </a>
+                          )}
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              </>
+            ) : (
+              !loading && (
+                <div className="rounded-3xl border border-dashed border-white/15 bg-white/[0.02] px-6 py-16 text-center">
+                  <div className="mx-auto mb-5 flex h-16 w-16 items-center justify-center rounded-2xl border border-white/10 bg-white/[0.04] text-gray-400">
+                    <Newspaper size={30} />
+                  </div>
+
+                  <h3 className="text-xl font-semibold">
+                    {search
+                      ? "ගැළපෙන පුවත් හමු වුණේ නැහැ"
+                      : "දැනට පුවත් නොමැත"}
+                  </h3>
+
+                  <p className="mx-auto mt-3 max-w-md text-sm leading-6 text-gray-400">
+                    {search
+                      ? "වෙනත් වචනයක් භාවිතයෙන් සොයන්න."
+                      : "RSS feeds ක්‍රියාත්මකදැයි පරීක්ෂා කර නැවත උත්සාහ කරන්න."}
+                  </p>
+
+                  {search ? (
+                    <button
+                      onClick={() => setSearch("")}
+                      className="mt-5 rounded-xl border border-white/10 px-4 py-2.5 text-sm text-gray-200 transition hover:bg-white/5"
+                    >
+                      සෙවුම ඉවත් කරන්න
+                    </button>
+                  ) : (
+                    <button
+                      onClick={() => void loadNews()}
+                      className="mt-5 rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-semibold transition hover:bg-blue-500"
+                    >
+                      නැවත පූරණය කරන්න
+                    </button>
+                  )}
+                </div>
+              )
+            )}
+          </div>
+
+          {/* RIGHT SIDEBAR: World and sports news */}
+          <aside className="order-3 rounded-2xl border border-white/10 bg-[#0e1420]/90 p-3 shadow-xl shadow-black/10 xl:sticky xl:top-28">
+            <div className="mb-3 flex items-center gap-2 px-1">
+              <div className="flex h-8 w-8 items-center justify-center rounded-xl bg-indigo-400/10 text-indigo-300">
+                <Globe2 size={18} />
+              </div>
+
+              <div>
+                <h3 className="text-sm font-bold text-white">World Brief</h3>
+                <p className="text-[10px] text-gray-500">Global updates</p>
+              </div>
+            </div>
+
+            <div className="mb-3 grid grid-cols-2 gap-1 rounded-xl bg-black/20 p-1">
+              <button
+                type="button"
+                onClick={() => setSideNewsTab("world")}
+                className={`flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-xs font-semibold transition ${
+                  sideNewsTab === "world"
+                    ? "bg-blue-500/20 text-blue-200"
+                    : "text-gray-500 hover:text-white"
+                }`}
+              >
+                <Globe2 size={13} /> World
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setSideNewsTab("sports")}
+                className={`flex items-center justify-center gap-1.5 rounded-lg px-2 py-2 text-xs font-semibold transition ${
+                  sideNewsTab === "sports"
+                    ? "bg-blue-500/20 text-blue-200"
+                    : "text-gray-500 hover:text-white"
+                }`}
+              >
+                <Trophy size={13} /> Sports
+              </button>
+            </div>
+
+            {sideNewsLoading ? (
+              <div className="space-y-3 py-2">
+                {Array.from({ length: 5 }).map((_, index) => (
+                  <div key={index} className="space-y-2">
+                    <div className="h-3 w-full animate-pulse rounded bg-white/10" />
+                    <div className="h-3 w-4/5 animate-pulse rounded bg-white/[0.06]" />
+                  </div>
+                ))}
+              </div>
+            ) : sideNews.length > 0 ? (
+              <div className="space-y-1">
+                {sideNews.map((item, index) => (
+                  <a
+                    key={`${item.link}-${index}`}
+                    href={item.link}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="group block rounded-xl border border-transparent p-2.5 transition hover:border-white/10 hover:bg-white/[0.04]"
+                  >
+                    <div className="mb-1.5 flex items-center gap-1.5">
+                      <span
+                        className={`h-1.5 w-1.5 rounded-full ${
+                          sideNewsTab === "sports"
+                            ? "bg-amber-300"
+                            : "bg-sky-300"
+                        }`}
+                      />
+                      <span className="text-[10px] font-semibold uppercase tracking-wide text-gray-500">
+                        {sideNewsTab === "sports" ? "Sports" : "World"}
+                      </span>
+                    </div>
+
+                    <p className="line-clamp-3 text-xs font-medium leading-5 text-gray-300 transition group-hover:text-white">
+                      {item.title}
+                    </p>
+
+                    {item.pubDate && (
+                      <p className="mt-1.5 text-[10px] text-gray-600">
+                        {formatDate(item.pubDate)}
+                      </p>
+                    )}
+
+                    <span className="mt-1 inline-flex items-center gap-1 text-[10px] text-blue-300 opacity-0 transition group-hover:opacity-100">
+                      Read story <ArrowUpRight size={11} />
+                    </span>
+                  </a>
+                ))}
+              </div>
+            ) : (
+              <div className="rounded-xl border border-white/[0.07] bg-white/[0.02] p-3 text-xs leading-5 text-gray-500">
+                {sideNewsError
+                  ? "පුවත් ලබාගැනීමට නොහැකි වුණා. පහත link එකෙන් බලන්න."
+                  : "පුවත් ලබාගනිමින්..."}
+
+                <a
+                  className="mt-2 flex items-center gap-1 font-semibold text-blue-300 hover:text-blue-200"
+                  href={
+                    sideNewsTab === "world"
+                      ? "https://news.google.com/search?q=world+news"
+                      : "https://news.google.com/search?q=world+sports"
+                  }
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  More {sideNewsTab === "world" ? "world" : "sports"} news{" "}
+                  <ArrowUpRight size={12} />
+                </a>
+              </div>
+            )}
+
+            <a
+              href={
+                sideNewsTab === "world"
+                  ? "https://news.google.com/search?q=world+news"
+                  : "https://news.google.com/search?q=world+sports"
+              }
+              target="_blank"
+              rel="noopener noreferrer"
+              className="mt-3 flex items-center justify-center gap-1.5 rounded-xl border border-white/10 bg-white/[0.03] px-3 py-2.5 text-xs font-semibold text-gray-300 transition hover:border-blue-400/30 hover:bg-blue-500/10 hover:text-white"
+            >
+              View all {sideNewsTab === "world" ? "world" : "sports"} news{" "}
+              <ArrowUpRight size={13} />
+            </a>
+
+            <p className="mt-2 text-center text-[10px] text-gray-600">
+              Auto refresh · 5 min
+            </p>
+          </aside>
+        </div>
+      </section>
+
+      {/* Footer */}
+      <footer className="border-t border-white/[0.08] bg-[#0a0d14] px-4 py-8 sm:px-6">
+        <div className="mx-auto flex max-w-7xl flex-col items-center justify-between gap-4 text-center sm:flex-row sm:text-left">
+          <a href="/" className="text-lg font-extrabold tracking-tight">
+            Lanka<span className="text-blue-400">Trend</span>
+          </a>
+
+          <p className="max-w-xl text-xs leading-6 text-gray-500">
+            පුවත් මුල් ප්‍රකාශකයන්ගේ මූලාශ්‍රවලින් ලබාගනී.
+            සම්පූර්ණ පුවත සඳහා අදාළ පුවත් මූලාශ්‍රයට පිවිසෙන්න.
+          </p>
+
+          <p className="shrink-0 text-xs text-gray-600">
+            Copyright {currentTime?.getFullYear() ?? ""} LankaTrend
           </p>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert h-[14px] w-4"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={14}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
-    </div>
+      </footer>
+
+      {/* Back to top */}
+      <button
+        type="button"
+        aria-label="පිටුවේ ඉහළට යන්න"
+        title="Back to top"
+        onClick={() =>
+          window.scrollTo({
+            top: 0,
+            behavior: "smooth",
+          })
+        }
+        className={`fixed bottom-5 right-5 z-50 flex h-12 w-12 items-center justify-center rounded-2xl border border-blue-400/30 bg-blue-600 text-white shadow-xl shadow-blue-950/40 transition-all duration-300 hover:-translate-y-1 hover:scale-110 hover:bg-blue-500 sm:bottom-7 sm:right-7 ${
+          showTopButton
+            ? "translate-y-0 scale-100 opacity-100"
+            : "pointer-events-none translate-y-6 scale-75 opacity-0"
+        }`}
+      >
+        <ArrowUp size={21} />
+      </button>
+    </main>
   );
 }
